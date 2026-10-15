@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stock Opname Scanner</title>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--tx:#1b1f24;--mut:#6b7280;--pri:#0b6bcb;--ok:#168a45;--err:#c62828;--bd:#e2e5ea}
+  @media(prefers-color-scheme:dark){:root{--bg:#14171b;--card:#1d2127;--tx:#eceff3;--mut:#9aa3af;--bd:#2c323a}}
+  *{box-sizing:border-box}
+  body{margin:0;font:16px system-ui,sans-serif;background:var(--bg);color:var(--tx);padding:12px;max-width:520px;margin-inline:auto}
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px;margin-bottom:12px}
+  label{display:block;font-size:13px;color:var(--mut);margin:8px 0 2px}
+  input{width:100%;padding:10px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--tx);font-size:16px}
+  button{padding:12px 14px;border:0;border-radius:8px;background:var(--pri);color:#fff;font-size:16px;font-weight:600}
+  button.sec{background:var(--bd);color:var(--tx)}
+  .row{display:flex;gap:8px;align-items:center}.row>*{flex:1}
+  #reader{width:100%;border-radius:8px;overflow:hidden}
+  #confirm{display:none}
+  #code{font:600 20px ui-monospace,monospace;word-break:break-all}
+  #log div{padding:6px 0;border-bottom:1px solid var(--bd);font-size:14px}
+  .ok{color:var(--ok)}.err{color:var(--err)}.mut{color:var(--mut)}
+  details summary{font-weight:600}
+</style>
+</head>
+<body>
+
+<details class="card" id="settings">
+  <summary>Pengaturan</summary>
+  <label>URL Web App (Apps Script /exec)</label><input id="url" inputmode="url">
+  <label>Token</label><input id="token" type="password">
+  <label>Nama petugas</label><input id="petugas">
+  <label>Lokasi / rak</label><input id="lokasi" placeholder="mis. A-01-03">
+  <div class="row" style="margin-top:10px"><button onclick="saveCfg()">Simpan</button></div>
+</details>
+
+<div class="card">
+  <div id="reader"></div>
+  <div class="row" style="margin-top:10px">
+    <button id="btnStart" onclick="start()">Mulai scan</button>
+    <button class="sec" id="btnStop" onclick="stop()">Stop</button>
+  </div>
+  <label style="display:flex;gap:8px;align-items:center;margin-top:10px">
+    <input type="checkbox" id="auto" style="width:auto"> Mode cepat: tiap scan langsung +1
+  </label>
+</div>
+
+<div class="card" id="confirm">
+  <div class="mut">Barcode terbaca</div>
+  <div id="code"></div>
+  <label>Qty</label><input id="qty" type="number" inputmode="numeric" min="1" value="1">
+  <div class="row" style="margin-top:10px">
+    <button onclick="confirmSave()">Simpan</button>
+    <button class="sec" onclick="cancelScan()">Batal</button>
+  </div>
+</div>
+
+<div class="card">
+  <label style="margin-top:0">Input manual (jika barcode rusak)</label>
+  <div class="row"><input id="manual" placeholder="ketik barcode"><button onclick="manualAdd()" style="flex:0 0 auto">Tambah</button></div>
+</div>
+
+<div class="card">
+  <div class="row"><strong>Riwayat</strong><span id="qinfo" class="mut" style="text-align:right"></span></div>
+  <div id="log"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const cfg = JSON.parse(localStorage.getItem('cfg') || '{}');
+let queue = JSON.parse(localStorage.getItem('queue') || '[]'); // antrean offline
+let scanner = null, last = '', lastT = 0, pendingCode = null, flushing = false;
+
+['url','token','petugas','lokasi'].forEach(k => $(k).value = cfg[k] || '');
+if (!cfg.url) $('settings').open = true;
+
+function saveCfg() {
+  ['url','token','petugas','lokasi'].forEach(k => cfg[k] = $(k).value.trim());
+  localStorage.setItem('cfg', JSON.stringify(cfg));
+  $('settings').open = false;
+}
+// lokasi sering berganti: simpan otomatis saat diubah
+$('lokasi').addEventListener('change', () => { cfg.lokasi = $('lokasi').value.trim(); localStorage.setItem('cfg', JSON.stringify(cfg)); });
+
+function log(msg, cls) {
+  const d = document.createElement('div');
+  d.className = cls || ''; d.textContent = msg;
+  $('log').prepend(d);
+  while ($('log').children.length > 30) $('log').lastChild.remove();
+}
+function saveQueue() {
+  localStorage.setItem('queue', JSON.stringify(queue));
+  $('qinfo').textContent = queue.length ? queue.length + ' menunggu kirim' : 'semua terkirim';
+}
+
+async function send(item) {
+  const r = await fetch(cfg.url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // hindari preflight CORS
+    body: JSON.stringify({ ...item, token: cfg.token })
+  });
+  const j = await r.json();
+  if (!j.ok) throw Object.assign(new Error(j.error), { server: true });
+  return j;
+}
+
+async function flush() {
+  if (flushing) return;
+  flushing = true;
+  while (queue.length) {
+    const item = queue[0];
+    try {
+      const j = await send(item);
+      queue.shift(); saveQueue();
+      log('✓ ' + item.barcode + ' ×' + item.qty + (j.nama ? ' — ' + j.nama : ''), 'ok');
+    } catch (e) {
+      log(e.server ? '✗ Server: ' + e.message : '… offline, ' + queue.length + ' antre', 'err');
+      break;
+    }
+  }
+  flushing = false;
+}
+
+function submit(barcode, qty) {
+  if (!cfg.url) { $('settings').open = true; alert('Isi URL Web App dulu'); return; }
+  queue.push({ ts: new Date().toISOString(), petugas: cfg.petugas, lokasi: $('lokasi').value.trim(), barcode, qty });
+  saveQueue(); flush();
+}
+
+function onScan(text) {
+  const now = Date.now();
+  if (text === last && now - lastT < 2000) return; // cegah double-scan
+  last = text; lastT = now;
+  if (navigator.vibrate) navigator.vibrate(80);
+  if ($('auto').checked) return submit(text, 1);
+  scanner.pause(true);
+  pendingCode = text;
+  $('code').textContent = text; $('qty').value = 1;
+  $('confirm').style.display = 'block';
+  $('qty').focus(); $('qty').select();
+}
+function confirmSave() {
+  submit(pendingCode, Math.max(1, parseInt($('qty').value) || 1));
+  cancelScan();
+}
+function cancelScan() {
+  $('confirm').style.display = 'none'; pendingCode = null; last = '';
+  if (scanner) try { scanner.resume(); } catch (e) {}
+}
+function manualAdd() {
+  const v = $('manual').value.trim();
+  if (v) { submit(v, 1); $('manual').value = ''; }
+}
+
+async function start() {
+  if (scanner && scanner.isScanning) return;
+  const F = Html5QrcodeSupportedFormats;
+  scanner = new Html5Qrcode('reader', {
+    formatsToSupport: [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.ITF, F.QR_CODE],
+    useBarCodeDetectorIfSupported: true
+  });
+  try {
+    await scanner.start({ facingMode: 'environment' },
+      { fps: 10, qrbox: { width: 280, height: 150 } }, onScan, () => {});
+  } catch (e) { alert('Kamera tidak bisa dibuka: ' + e); }
+}
+async function stop() {
+  if (scanner && scanner.isScanning) await scanner.stop();
+}
+
+window.addEventListener('online', flush);
+saveQueue(); flush();
+</script>
+</body>
+</html>
