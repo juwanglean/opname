@@ -47,6 +47,9 @@
     <button class="sec" onclick="stop()">Stop</button>
     <button class="sec" id="btnTorch" onclick="toggleTorch()" style="flex:0 0 auto">🔦</button>
   </div>
+  <div id="zoomRow" class="row" style="margin-top:10px;display:none">
+    <span class="mut" style="flex:0 0 auto">Zoom</span><input type="range" id="zoom" style="padding:0">
+  </div>
   <label class="chk"><input type="checkbox" id="auto"> Mode cepat: tiap scan langsung +1 (tanpa konfirmasi)</label>
   <label class="chk"><input type="checkbox" id="hires"> Tajamkan otomatis (ambil foto resolusi tinggi di latar)</label>
 </div>
@@ -142,12 +145,24 @@ function submit(barcode, qty) {
 
 /* ---------- decoder QR ---------- */
 const cv = $('cv');
-function jsqrRegion(src, sx, sy, sw, sh, maxW) {
+// regangkan kontras (membantu label cetak yang pudar / berpantulan)
+function stretch(d) {
+  const n = d.length >> 2, g = new Uint8Array(n), hist = new Uint32Array(256);
+  for (let i = 0, j = 0; i < n; i++, j += 4) { const y = (d[j] * 77 + d[j + 1] * 150 + d[j + 2] * 29) >> 8; g[i] = y; hist[y]++; }
+  let lo = 0, hi = 255, acc = 0; const c = n * 0.02;
+  while (lo < 255 && (acc += hist[lo]) < c) lo++;
+  acc = 0; while (hi > 0 && (acc += hist[hi]) < c) hi--;
+  const rng = Math.max(1, hi - lo);
+  for (let i = 0, j = 0; i < n; i++, j += 4) { let v = (g[i] - lo) * 255 / rng; v = v < 0 ? 0 : v > 255 ? 255 : v; d[j] = d[j + 1] = d[j + 2] = v; }
+}
+function jsqrRegion(src, sx, sy, sw, sh, maxW, enh) {
   const sc = Math.min(1, maxW / sw), w = Math.round(sw * sc), h = Math.round(sh * sc);
   cv.width = w; cv.height = h;
   const ctx = cv.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(src, sx, sy, sw, sh, 0, 0, w, h);
-  const r = jsQR(ctx.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: 'attemptBoth' });
+  const id = ctx.getImageData(0, 0, w, h);
+  if (enh) stretch(id.data);
+  const r = jsQR(id.data, w, h, { inversionAttempts: 'attemptBoth' });
   return r ? r.data : null;
 }
 function dims(src) { return [src.videoWidth || src.width, src.videoHeight || src.height]; }
@@ -159,10 +174,11 @@ async function decodeFrame(v) {
   }
   const [W, H] = dims(v);
   if (!W || !H) return null;
-  const s = Math.floor(Math.min(W, H) * 0.7);
-  let t = jsqrRegion(v, Math.floor((W - s) / 2), Math.floor((H - s) / 2), s, s, 900);
-  if (!t && tick % 3 === 0) t = jsqrRegion(v, 0, 0, W, H, 1280);
-  return t;
+  const s = Math.floor(Math.min(W, H) * 0.7), x = Math.floor((W - s) / 2), y = Math.floor((H - s) / 2);
+  return jsqrRegion(v, x, y, s, s, 900, false)
+      || jsqrRegion(v, x, y, s, s, 900, true)   // kontras diregangkan
+      || jsqrRegion(v, x, y, s, s, 560, true)   // diperkecil: mengurangi efek blur
+      || (tick % 3 === 0 ? jsqrRegion(v, 0, 0, W, H, 1280, true) : null);
 }
 // foto resolusi tinggi: coba beberapa ukuran
 async function decodePhoto(bmp) {
@@ -199,6 +215,12 @@ async function start() {
     }
   } catch (e) {}
   $('btnTorch').style.display = caps.torch ? '' : 'none';
+  if (caps.zoom) {
+    const z = $('zoom');
+    z.min = caps.zoom.min; z.max = caps.zoom.max; z.step = caps.zoom.step || 0.1;
+    z.value = Math.min(caps.zoom.max, Math.max(caps.zoom.min, 1));
+    $('zoomRow').style.display = '';
+  } else $('zoomRow').style.display = 'none';
   ic = ('ImageCapture' in window) ? new ImageCapture(track) : null;
   const s = track.getSettings();
   info = (s.width || '?') + '×' + (s.height || '?') + ' · ' + (detector ? 'BarcodeDetector+jsQR' : 'jsQR');
@@ -280,6 +302,21 @@ $('photo').addEventListener('change', async e => {
     if (txt) onScan(txt);
     else setStatus('QR tidak ditemukan di foto. Ambil lebih dekat dan tajam.', 'err');
   } catch (err) { setStatus('Gagal membaca foto: ' + err.message, 'err'); }
+});
+
+$('zoom').addEventListener('input', async e => {
+  const t = stream && stream.getVideoTracks()[0];
+  if (!t) return;
+  try { await t.applyConstraints({ advanced: [{ zoom: parseFloat(e.target.value) }] }); } catch (err) {}
+});
+// ketuk gambar kamera untuk memfokuskan ulang di titik itu
+$('video').addEventListener('click', async e => {
+  const t = stream && stream.getVideoTracks()[0];
+  if (!t) return;
+  const r = e.currentTarget.getBoundingClientRect();
+  const pt = { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
+  try { await t.applyConstraints({ advanced: [{ focusMode: 'single-shot', pointsOfInterest: [pt] }] }); } catch (err) {}
+  setTimeout(() => t.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {}), 1500);
 });
 
 window.addEventListener('online', flush);
