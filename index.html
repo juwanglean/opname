@@ -38,21 +38,25 @@
 </details>
 
 <div class="card">
-  <div class="vwrap"><video id="video" playsinline muted></video><div class="guide"></div></div>
-  <canvas id="cv" hidden></canvas>
-  <div id="status" class="mut">Kamera belum aktif</div>
-  <div class="row" style="margin-top:10px">
-    <button id="btnStart" onclick="start()">Mulai scan</button>
-    <button class="sec" onclick="stop()">Stop</button>
-  </div>
-  <div class="row" style="margin-top:8px">
-    <label class="btn sec" style="margin:0;color:var(--tx);font-size:16px">📷 Foto QR (cadangan)
-      <input type="file" id="photo" accept="image/*" capture="environment" hidden>
-    </label>
-  </div>
+  <label class="btn" style="margin:0;color:#fff;font-size:20px;padding:18px">📷 Foto QR
+    <input type="file" id="photo" accept="image/*" capture="environment" hidden>
+  </label>
+  <div id="status" class="mut">Tekan Foto QR, ambil gambar QR, lalu hasilnya terbaca otomatis.</div>
   <label style="display:flex;gap:8px;align-items:center;margin-top:10px">
     <input type="checkbox" id="auto" style="width:auto"> Mode cepat: tiap scan langsung +1
   </label>
+  <label style="display:flex;gap:8px;align-items:center;margin-top:6px">
+    <input type="checkbox" id="reopen" style="width:auto" checked> Buka kamera lagi setelah simpan
+  </label>
+  <details style="margin-top:12px">
+    <summary class="mut" style="font-weight:400">Scan langsung (eksperimental)</summary>
+    <div class="vwrap" style="margin-top:8px"><video id="video" playsinline muted></video><div class="guide"></div></div>
+    <canvas id="cv" hidden></canvas>
+    <div class="row" style="margin-top:10px">
+      <button onclick="start()">Mulai scan</button>
+      <button class="sec" onclick="stop()">Stop</button>
+    </div>
+  </details>
 </div>
 
 <div class="card" id="confirm">
@@ -140,10 +144,10 @@ function submit(barcode, qty) {
 }
 
 /* ---------- decoder QR ---------- */
-function jsqrDecode(src) {
+function jsqrDecode(src, maxW = 1280) {
   const w0 = src.videoWidth || src.width, h0 = src.videoHeight || src.height;
   if (!w0 || !h0) return null;
-  const sc = Math.min(1, 1280 / w0), w = Math.round(w0 * sc), h = Math.round(h0 * sc);
+  const sc = Math.min(1, maxW / w0), w = Math.round(w0 * sc), h = Math.round(h0 * sc);
   const cv = $('cv'); cv.width = w; cv.height = h;
   const ctx = cv.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(src, 0, 0, w, h);
@@ -155,6 +159,13 @@ async function decode(src) {
     try { const r = await detector.detect(src); if (r.length) return r[0].rawValue; } catch (e) {}
   }
   return jsqrDecode(src);
+}
+// foto resolusi tinggi: coba beberapa ukuran supaya QR kecil/rapat tetap terbaca
+async function decodePhoto(bmp) {
+  if (detector) {
+    try { const r = await detector.detect(bmp); if (r.length) return r[0].rawValue; } catch (e) {}
+  }
+  return jsqrDecode(bmp, 1280) || jsqrDecode(bmp, 2000) || jsqrDecode(bmp, 3200);
 }
 
 /* ---------- kamera ---------- */
@@ -216,6 +227,7 @@ function onScan(text) {
 function confirmSave() {
   submit(pendingCode, Math.max(1, parseInt($('qty').value) || 1));
   cancelScan();
+  if (!running && $('reopen').checked) $('photo').click();
 }
 function cancelScan() {
   $('confirm').style.display = 'none'; pendingCode = null; last = ''; paused = false;
@@ -232,9 +244,12 @@ $('photo').addEventListener('change', async e => {
   setStatus('Membaca foto…');
   try {
     const bmp = await createImageBitmap(f);
-    const txt = await decode(bmp);
-    if (txt) { setStatus('Foto terbaca', 'ok'); onScan(txt); }
-    else setStatus('QR tidak ditemukan di foto. Coba foto lebih dekat dan tajam.', 'err');
+    const txt = await decodePhoto(bmp);
+    if (txt) {
+      setStatus('Terbaca: ' + txt, 'ok'); onScan(txt);
+      // mode cepat: langsung buka kamera lagi (bisa ditolak browser, tidak apa-apa)
+      if ($('auto').checked && $('reopen').checked) { try { $('photo').click(); } catch (e) {} }
+    } else setStatus('QR tidak ditemukan di foto. Ambil lebih dekat, tajam, dan QR memenuhi sekitar separuh frame.', 'err');
   } catch (err) { setStatus('Gagal membaca foto: ' + err.message, 'err'); }
 });
 
