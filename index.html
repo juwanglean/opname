@@ -15,11 +15,12 @@
   button,.btn{display:block;text-align:center;padding:12px 14px;border:0;border-radius:8px;background:var(--pri);color:#fff;font-size:16px;font-weight:600}
   button.sec,.btn.sec{background:var(--bd);color:var(--tx)}
   .row{display:flex;gap:8px;align-items:center}.row>*{flex:1}
+  .chk{display:flex;gap:8px;align-items:center;margin-top:8px}.chk input{width:auto}
   .vwrap{position:relative;background:#000;border-radius:8px;overflow:hidden}
-  #video{width:100%;display:block;min-height:180px}
-  .guide{position:absolute;inset:0;margin:auto;width:60%;aspect-ratio:1;border:3px solid rgba(255,255,255,.8);border-radius:12px;pointer-events:none;box-shadow:0 0 0 999px rgba(0,0,0,.25)}
+  #video{width:100%;display:block;min-height:200px;object-fit:cover}
+  .guide{position:absolute;inset:0;margin:auto;width:62%;aspect-ratio:1;border:3px solid rgba(255,255,255,.85);border-radius:12px;pointer-events:none;box-shadow:0 0 0 999px rgba(0,0,0,.25)}
   #status{font-size:13px;margin-top:8px;word-break:break-word}
-  #confirm{display:none}
+  #confirm{display:none;border-color:var(--pri)}
   #code{font:600 20px ui-monospace,monospace;word-break:break-all}
   #log div{padding:6px 0;border-bottom:1px solid var(--bd);font-size:14px}
   .ok{color:var(--ok)}.err{color:var(--err)}.mut{color:var(--mut)}
@@ -38,25 +39,16 @@
 </details>
 
 <div class="card">
-  <label class="btn" style="margin:0;color:#fff;font-size:20px;padding:18px">📷 Foto QR
-    <input type="file" id="photo" accept="image/*" capture="environment" hidden>
-  </label>
-  <div id="status" class="mut">Tekan Foto QR, ambil gambar QR, lalu hasilnya terbaca otomatis.</div>
-  <label style="display:flex;gap:8px;align-items:center;margin-top:10px">
-    <input type="checkbox" id="auto" style="width:auto"> Mode cepat: tiap scan langsung +1
-  </label>
-  <label style="display:flex;gap:8px;align-items:center;margin-top:6px">
-    <input type="checkbox" id="reopen" style="width:auto" checked> Buka kamera lagi setelah simpan
-  </label>
-  <details style="margin-top:12px">
-    <summary class="mut" style="font-weight:400">Scan langsung (eksperimental)</summary>
-    <div class="vwrap" style="margin-top:8px"><video id="video" playsinline muted></video><div class="guide"></div></div>
-    <canvas id="cv" hidden></canvas>
-    <div class="row" style="margin-top:10px">
-      <button onclick="start()">Mulai scan</button>
-      <button class="sec" onclick="stop()">Stop</button>
-    </div>
-  </details>
+  <div class="vwrap"><video id="video" playsinline muted autoplay></video><div class="guide"></div></div>
+  <canvas id="cv" hidden></canvas>
+  <div id="status" class="mut">Tekan Mulai scan, lalu arahkan QR ke dalam kotak. Tidak perlu menekan shutter.</div>
+  <div class="row" style="margin-top:10px">
+    <button onclick="start()">Mulai scan</button>
+    <button class="sec" onclick="stop()">Stop</button>
+    <button class="sec" id="btnTorch" onclick="toggleTorch()" style="flex:0 0 auto">🔦</button>
+  </div>
+  <label class="chk"><input type="checkbox" id="auto"> Mode cepat: tiap scan langsung +1 (tanpa konfirmasi)</label>
+  <label class="chk"><input type="checkbox" id="hires"> Tajamkan otomatis (ambil foto resolusi tinggi di latar)</label>
 </div>
 
 <div class="card" id="confirm">
@@ -69,10 +61,14 @@
   </div>
 </div>
 
-<div class="card">
-  <label style="margin-top:0">Input manual</label>
+<details class="card">
+  <summary>Cadangan: foto manual / ketik manual</summary>
+  <label class="btn sec" style="margin-top:10px;color:var(--tx)">📷 Foto QR
+    <input type="file" id="photo" accept="image/*" capture="environment" hidden>
+  </label>
+  <label>Input manual</label>
   <div class="row"><input id="manual" placeholder="ketik isi QR / kode"><button onclick="manualAdd()" style="flex:0 0 auto">Tambah</button></div>
-</div>
+</details>
 
 <div class="card">
   <div class="row"><strong>Riwayat</strong><span id="qinfo" class="mut" style="text-align:right"></span></div>
@@ -84,13 +80,14 @@
 const $ = id => document.getElementById(id);
 const cfg = JSON.parse(localStorage.getItem('cfg') || '{}');
 let queue = JSON.parse(localStorage.getItem('queue') || '[]');
-let stream = null, running = false, paused = false, last = '', lastT = 0, pendingCode = null, flushing = false;
+let stream = null, running = false, paused = false, flushing = false;
+let last = '', lastT = 0, pendingCode = null;
+let ic = null, lastShot = 0, tick = 0, torchOn = false, info = '';
 let detector = null;
 if ('BarcodeDetector' in window) { try { detector = new BarcodeDetector({ formats: ['qr_code'] }); } catch (e) {} }
 
 ['url','token','petugas','lokasi'].forEach(k => $(k).value = cfg[k] || '');
 if (!cfg.url) $('settings').open = true;
-
 function saveCfg() {
   ['url','token','petugas','lokasi'].forEach(k => cfg[k] = $(k).value.trim());
   localStorage.setItem('cfg', JSON.stringify(cfg));
@@ -144,35 +141,43 @@ function submit(barcode, qty) {
 }
 
 /* ---------- decoder QR ---------- */
-function jsqrDecode(src, maxW = 1280) {
-  const w0 = src.videoWidth || src.width, h0 = src.videoHeight || src.height;
-  if (!w0 || !h0) return null;
-  const sc = Math.min(1, maxW / w0), w = Math.round(w0 * sc), h = Math.round(h0 * sc);
-  const cv = $('cv'); cv.width = w; cv.height = h;
+const cv = $('cv');
+function jsqrRegion(src, sx, sy, sw, sh, maxW) {
+  const sc = Math.min(1, maxW / sw), w = Math.round(sw * sc), h = Math.round(sh * sc);
+  cv.width = w; cv.height = h;
   const ctx = cv.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(src, 0, 0, w, h);
+  ctx.drawImage(src, sx, sy, sw, sh, 0, 0, w, h);
   const r = jsQR(ctx.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: 'attemptBoth' });
   return r ? r.data : null;
 }
-async function decode(src) {
+function dims(src) { return [src.videoWidth || src.width, src.videoHeight || src.height]; }
+
+// frame live: detektor native di seluruh frame, lalu jsQR di area tengah pada resolusi asli
+async function decodeFrame(v) {
   if (detector) {
-    try { const r = await detector.detect(src); if (r.length) return r[0].rawValue; } catch (e) {}
+    try { const r = await detector.detect(v); if (r.length) return r[0].rawValue; } catch (e) {}
   }
-  return jsqrDecode(src);
+  const [W, H] = dims(v);
+  if (!W || !H) return null;
+  const s = Math.floor(Math.min(W, H) * 0.7);
+  let t = jsqrRegion(v, Math.floor((W - s) / 2), Math.floor((H - s) / 2), s, s, 900);
+  if (!t && tick % 3 === 0) t = jsqrRegion(v, 0, 0, W, H, 1280);
+  return t;
 }
-// foto resolusi tinggi: coba beberapa ukuran supaya QR kecil/rapat tetap terbaca
+// foto resolusi tinggi: coba beberapa ukuran
 async function decodePhoto(bmp) {
   if (detector) {
     try { const r = await detector.detect(bmp); if (r.length) return r[0].rawValue; } catch (e) {}
   }
-  return jsqrDecode(bmp, 1280) || jsqrDecode(bmp, 2000) || jsqrDecode(bmp, 3200);
+  const [W, H] = dims(bmp);
+  return jsqrRegion(bmp, 0, 0, W, H, 1280) || jsqrRegion(bmp, 0, 0, W, H, 2000) || jsqrRegion(bmp, 0, 0, W, H, 3200);
 }
 
 /* ---------- kamera ---------- */
 async function start() {
   if (running) return;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    return setStatus('Browser tidak mendukung kamera / halaman bukan HTTPS', 'err');
+    return setStatus('Browser tidak mendukung kamera, atau halaman bukan HTTPS', 'err');
   }
   try {
     stream = await navigator.mediaDevices.getUserMedia({
@@ -186,38 +191,65 @@ async function start() {
   v.srcObject = stream;
   try { await v.play(); } catch (e) {}
   const track = stream.getVideoTracks()[0];
+  let caps = {};
   try {
-    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    caps = track.getCapabilities ? track.getCapabilities() : {};
     if (caps.focusMode && caps.focusMode.includes('continuous')) {
       await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
     }
   } catch (e) {}
+  $('btnTorch').style.display = caps.torch ? '' : 'none';
+  ic = ('ImageCapture' in window) ? new ImageCapture(track) : null;
   const s = track.getSettings();
-  running = true; paused = false;
-  setStatus('Kamera aktif ' + (s.width || '?') + '×' + (s.height || '?') + ' · decoder: ' + (detector ? 'BarcodeDetector + jsQR' : 'jsQR'));
+  info = (s.width || '?') + '×' + (s.height || '?') + ' · ' + (detector ? 'BarcodeDetector+jsQR' : 'jsQR');
+  running = true; paused = false; tick = 0;
   loop();
 }
 function stop() {
-  running = false;
+  running = false; torchOn = false;
   if (stream) stream.getTracks().forEach(t => t.stop());
   stream = null; $('video').srcObject = null;
   setStatus('Kamera dihentikan');
+}
+async function toggleTorch() {
+  const t = stream && stream.getVideoTracks()[0];
+  if (!t) return;
+  torchOn = !torchOn;
+  try { await t.applyConstraints({ advanced: [{ torch: torchOn }] }); }
+  catch (e) { torchOn = false; setStatus('Senter tidak didukung di HP ini', 'err'); }
 }
 async function loop() {
   if (!running) return;
   const v = $('video');
   if (!paused && v.readyState >= 2) {
-    try { const txt = await decode(v); if (txt) onScan(txt); } catch (e) {}
+    tick++;
+    try {
+      let txt = await decodeFrame(v);
+      // opsional: ambil foto resolusi tinggi (autofokus penuh) tiap ~1,5 dtk
+      if (!txt && ic && $('hires').checked && Date.now() - lastShot > 1500) {
+        lastShot = Date.now();
+        try {
+          const blob = await ic.takePhoto({ fillLightMode: 'off' });
+          const bmp = await createImageBitmap(blob);
+          txt = await decodePhoto(bmp);
+          if (bmp.close) bmp.close();
+        } catch (e) {}
+      }
+      if (txt) onScan(txt);
+    } catch (e) {}
+    if (tick % 8 === 0 && !paused) setStatus('Memindai… ' + info + ' · frame ' + tick);
   }
-  setTimeout(loop, 120);
+  setTimeout(loop, 80);
 }
 
 /* ---------- hasil scan ---------- */
 function onScan(text) {
   const now = Date.now();
-  if (text === last && now - lastT < 2000) return;
+  // QR yang sama masih di depan kamera -> abaikan (harus menjauh >1,5 dtk baru dihitung lagi)
+  if (text === last && now - lastT < 1500) { lastT = now; return; }
   last = text; lastT = now;
   if (navigator.vibrate) navigator.vibrate(80);
+  setStatus('Terbaca: ' + text, 'ok');
   if ($('auto').checked) return submit(text, 1);
   paused = true; pendingCode = text;
   $('code').textContent = text; $('qty').value = 1;
@@ -227,17 +259,17 @@ function onScan(text) {
 function confirmSave() {
   submit(pendingCode, Math.max(1, parseInt($('qty').value) || 1));
   cancelScan();
-  if (!running && $('reopen').checked) $('photo').click();
 }
 function cancelScan() {
-  $('confirm').style.display = 'none'; pendingCode = null; last = ''; paused = false;
+  $('confirm').style.display = 'none';
+  last = pendingCode || last; lastT = Date.now(); pendingCode = null; paused = false;
 }
 function manualAdd() {
   const v = $('manual').value.trim();
   if (v) { submit(v, 1); $('manual').value = ''; }
 }
 
-/* ---------- cadangan: foto QR lewat kamera bawaan HP ---------- */
+/* ---------- cadangan: foto lewat kamera bawaan ---------- */
 $('photo').addEventListener('change', async e => {
   const f = e.target.files[0]; e.target.value = '';
   if (!f) return;
@@ -245,11 +277,8 @@ $('photo').addEventListener('change', async e => {
   try {
     const bmp = await createImageBitmap(f);
     const txt = await decodePhoto(bmp);
-    if (txt) {
-      setStatus('Terbaca: ' + txt, 'ok'); onScan(txt);
-      // mode cepat: langsung buka kamera lagi (bisa ditolak browser, tidak apa-apa)
-      if ($('auto').checked && $('reopen').checked) { try { $('photo').click(); } catch (e) {} }
-    } else setStatus('QR tidak ditemukan di foto. Ambil lebih dekat, tajam, dan QR memenuhi sekitar separuh frame.', 'err');
+    if (txt) onScan(txt);
+    else setStatus('QR tidak ditemukan di foto. Ambil lebih dekat dan tajam.', 'err');
   } catch (err) { setStatus('Gagal membaca foto: ' + err.message, 'err'); }
 });
 
