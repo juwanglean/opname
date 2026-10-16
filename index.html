@@ -155,14 +155,17 @@ function manualAdd() {
 
 async function start() {
   if (scanner && scanner.isScanning) return;
-  const F = Html5QrcodeSupportedFormats;
   scanner = new Html5Qrcode('reader', {
-    formatsToSupport: [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.ITF, F.QR_CODE],
-    useBarCodeDetectorIfSupported: true
+    formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE],
+    verbose: false
   });
   try {
-    await scanner.start({ facingMode: 'environment' },
-      { fps: 10, qrbox: { width: 280, height: 150 } }, onScan, () => {});
+    await scanner.start({ facingMode: 'environment' }, {
+      fps: 15,
+      // kotak scan persegi (QR berbentuk persegi), 75% dari sisi terpendek video
+      qrbox: (w, h) => { const s = Math.floor(Math.min(w, h) * 0.75); return { width: s, height: s }; },
+      aspectRatio: 1.0
+    }, onScan, () => {});
   } catch (e) { alert('Kamera tidak bisa dibuka: ' + e); }
 }
 async function stop() {
