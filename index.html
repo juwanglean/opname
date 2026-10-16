@@ -12,10 +12,13 @@
   .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px;margin-bottom:12px}
   label{display:block;font-size:13px;color:var(--mut);margin:8px 0 2px}
   input{width:100%;padding:10px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--tx);font-size:16px}
-  button{padding:12px 14px;border:0;border-radius:8px;background:var(--pri);color:#fff;font-size:16px;font-weight:600}
-  button.sec{background:var(--bd);color:var(--tx)}
+  button,.btn{display:block;text-align:center;padding:12px 14px;border:0;border-radius:8px;background:var(--pri);color:#fff;font-size:16px;font-weight:600}
+  button.sec,.btn.sec{background:var(--bd);color:var(--tx)}
   .row{display:flex;gap:8px;align-items:center}.row>*{flex:1}
-  #reader{width:100%;border-radius:8px;overflow:hidden}
+  .vwrap{position:relative;background:#000;border-radius:8px;overflow:hidden}
+  #video{width:100%;display:block;min-height:180px}
+  .guide{position:absolute;inset:0;margin:auto;width:60%;aspect-ratio:1;border:3px solid rgba(255,255,255,.8);border-radius:12px;pointer-events:none;box-shadow:0 0 0 999px rgba(0,0,0,.25)}
+  #status{font-size:13px;margin-top:8px;word-break:break-word}
   #confirm{display:none}
   #code{font:600 20px ui-monospace,monospace;word-break:break-all}
   #log div{padding:6px 0;border-bottom:1px solid var(--bd);font-size:14px}
@@ -35,10 +38,17 @@
 </details>
 
 <div class="card">
-  <div id="reader"></div>
+  <div class="vwrap"><video id="video" playsinline muted></video><div class="guide"></div></div>
+  <canvas id="cv" hidden></canvas>
+  <div id="status" class="mut">Kamera belum aktif</div>
   <div class="row" style="margin-top:10px">
     <button id="btnStart" onclick="start()">Mulai scan</button>
-    <button class="sec" id="btnStop" onclick="stop()">Stop</button>
+    <button class="sec" onclick="stop()">Stop</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <label class="btn sec" style="margin:0;color:var(--tx);font-size:16px">📷 Foto QR (cadangan)
+      <input type="file" id="photo" accept="image/*" capture="environment" hidden>
+    </label>
   </div>
   <label style="display:flex;gap:8px;align-items:center;margin-top:10px">
     <input type="checkbox" id="auto" style="width:auto"> Mode cepat: tiap scan langsung +1
@@ -46,7 +56,7 @@
 </div>
 
 <div class="card" id="confirm">
-  <div class="mut">Barcode terbaca</div>
+  <div class="mut">QR terbaca</div>
   <div id="code"></div>
   <label>Qty</label><input id="qty" type="number" inputmode="numeric" min="1" value="1">
   <div class="row" style="margin-top:10px">
@@ -56,8 +66,8 @@
 </div>
 
 <div class="card">
-  <label style="margin-top:0">Input manual (jika barcode rusak)</label>
-  <div class="row"><input id="manual" placeholder="ketik barcode"><button onclick="manualAdd()" style="flex:0 0 auto">Tambah</button></div>
+  <label style="margin-top:0">Input manual</label>
+  <div class="row"><input id="manual" placeholder="ketik isi QR / kode"><button onclick="manualAdd()" style="flex:0 0 auto">Tambah</button></div>
 </div>
 
 <div class="card">
@@ -65,12 +75,14 @@
   <div id="log"></div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const cfg = JSON.parse(localStorage.getItem('cfg') || '{}');
-let queue = JSON.parse(localStorage.getItem('queue') || '[]'); // antrean offline
-let scanner = null, last = '', lastT = 0, pendingCode = null, flushing = false;
+let queue = JSON.parse(localStorage.getItem('queue') || '[]');
+let stream = null, running = false, paused = false, last = '', lastT = 0, pendingCode = null, flushing = false;
+let detector = null;
+if ('BarcodeDetector' in window) { try { detector = new BarcodeDetector({ formats: ['qr_code'] }); } catch (e) {} }
 
 ['url','token','petugas','lokasi'].forEach(k => $(k).value = cfg[k] || '');
 if (!cfg.url) $('settings').open = true;
@@ -80,9 +92,9 @@ function saveCfg() {
   localStorage.setItem('cfg', JSON.stringify(cfg));
   $('settings').open = false;
 }
-// lokasi sering berganti: simpan otomatis saat diubah
 $('lokasi').addEventListener('change', () => { cfg.lokasi = $('lokasi').value.trim(); localStorage.setItem('cfg', JSON.stringify(cfg)); });
 
+function setStatus(msg, cls) { const s = $('status'); s.textContent = msg; s.className = cls || 'mut'; }
 function log(msg, cls) {
   const d = document.createElement('div');
   d.className = cls || ''; d.textContent = msg;
@@ -94,17 +106,17 @@ function saveQueue() {
   $('qinfo').textContent = queue.length ? queue.length + ' menunggu kirim' : 'semua terkirim';
 }
 
+/* ---------- kirim ke Google Sheets ---------- */
 async function send(item) {
   const r = await fetch(cfg.url, {
     method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // hindari preflight CORS
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     body: JSON.stringify({ ...item, token: cfg.token })
   });
   const j = await r.json();
   if (!j.ok) throw Object.assign(new Error(j.error), { server: true });
   return j;
 }
-
 async function flush() {
   if (flushing) return;
   flushing = true;
@@ -121,21 +133,82 @@ async function flush() {
   }
   flushing = false;
 }
-
 function submit(barcode, qty) {
   if (!cfg.url) { $('settings').open = true; alert('Isi URL Web App dulu'); return; }
   queue.push({ ts: new Date().toISOString(), petugas: cfg.petugas, lokasi: $('lokasi').value.trim(), barcode, qty });
   saveQueue(); flush();
 }
 
+/* ---------- decoder QR ---------- */
+function jsqrDecode(src) {
+  const w0 = src.videoWidth || src.width, h0 = src.videoHeight || src.height;
+  if (!w0 || !h0) return null;
+  const sc = Math.min(1, 1280 / w0), w = Math.round(w0 * sc), h = Math.round(h0 * sc);
+  const cv = $('cv'); cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(src, 0, 0, w, h);
+  const r = jsQR(ctx.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: 'attemptBoth' });
+  return r ? r.data : null;
+}
+async function decode(src) {
+  if (detector) {
+    try { const r = await detector.detect(src); if (r.length) return r[0].rawValue; } catch (e) {}
+  }
+  return jsqrDecode(src);
+}
+
+/* ---------- kamera ---------- */
+async function start() {
+  if (running) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return setStatus('Browser tidak mendukung kamera / halaman bukan HTTPS', 'err');
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false
+    });
+  } catch (e) {
+    return setStatus('Kamera gagal dibuka: ' + e.name + ' — ' + e.message, 'err');
+  }
+  const v = $('video');
+  v.srcObject = stream;
+  try { await v.play(); } catch (e) {}
+  const track = stream.getVideoTracks()[0];
+  try {
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if (caps.focusMode && caps.focusMode.includes('continuous')) {
+      await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+    }
+  } catch (e) {}
+  const s = track.getSettings();
+  running = true; paused = false;
+  setStatus('Kamera aktif ' + (s.width || '?') + '×' + (s.height || '?') + ' · decoder: ' + (detector ? 'BarcodeDetector + jsQR' : 'jsQR'));
+  loop();
+}
+function stop() {
+  running = false;
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null; $('video').srcObject = null;
+  setStatus('Kamera dihentikan');
+}
+async function loop() {
+  if (!running) return;
+  const v = $('video');
+  if (!paused && v.readyState >= 2) {
+    try { const txt = await decode(v); if (txt) onScan(txt); } catch (e) {}
+  }
+  setTimeout(loop, 120);
+}
+
+/* ---------- hasil scan ---------- */
 function onScan(text) {
   const now = Date.now();
-  if (text === last && now - lastT < 2000) return; // cegah double-scan
+  if (text === last && now - lastT < 2000) return;
   last = text; lastT = now;
   if (navigator.vibrate) navigator.vibrate(80);
   if ($('auto').checked) return submit(text, 1);
-  scanner.pause(true);
-  pendingCode = text;
+  paused = true; pendingCode = text;
   $('code').textContent = text; $('qty').value = 1;
   $('confirm').style.display = 'block';
   $('qty').focus(); $('qty').select();
@@ -145,32 +218,25 @@ function confirmSave() {
   cancelScan();
 }
 function cancelScan() {
-  $('confirm').style.display = 'none'; pendingCode = null; last = '';
-  if (scanner) try { scanner.resume(); } catch (e) {}
+  $('confirm').style.display = 'none'; pendingCode = null; last = ''; paused = false;
 }
 function manualAdd() {
   const v = $('manual').value.trim();
   if (v) { submit(v, 1); $('manual').value = ''; }
 }
 
-async function start() {
-  if (scanner && scanner.isScanning) return;
-  scanner = new Html5Qrcode('reader', {
-    formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE],
-    verbose: false
-  });
+/* ---------- cadangan: foto QR lewat kamera bawaan HP ---------- */
+$('photo').addEventListener('change', async e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  setStatus('Membaca foto…');
   try {
-    await scanner.start({ facingMode: 'environment' }, {
-      fps: 15,
-      // kotak scan persegi (QR berbentuk persegi), 75% dari sisi terpendek video
-      qrbox: (w, h) => { const s = Math.floor(Math.min(w, h) * 0.75); return { width: s, height: s }; },
-      aspectRatio: 1.0
-    }, onScan, () => {});
-  } catch (e) { alert('Kamera tidak bisa dibuka: ' + e); }
-}
-async function stop() {
-  if (scanner && scanner.isScanning) await scanner.stop();
-}
+    const bmp = await createImageBitmap(f);
+    const txt = await decode(bmp);
+    if (txt) { setStatus('Foto terbaca', 'ok'); onScan(txt); }
+    else setStatus('QR tidak ditemukan di foto. Coba foto lebih dekat dan tajam.', 'err');
+  } catch (err) { setStatus('Gagal membaca foto: ' + err.message, 'err'); }
+});
 
 window.addEventListener('online', flush);
 saveQueue(); flush();
